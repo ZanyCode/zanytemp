@@ -28,19 +28,33 @@ constexpr chip::EndpointId kTemperatureSensorEndpointId = 1;
 
 Nrf::Matter::IdentifyCluster sIdentifyCluster(kTemperatureSensorEndpointId);
 
+constexpr uint32_t kFactoryResetTriggerMs = 3000;
+constexpr Nrf::ButtonMask kFactoryResetButtonMask = DK_BTN1_MSK;
+
 #ifdef CONFIG_CHIP_ICD_UAT_SUPPORT
-#define UAT_BUTTON_MASK DK_BTN3_MSK
+#define UAT_BUTTON_MASK 1
 #endif
 } /* namespace */
 
+void AppTask::FactoryResetTimerCallback(k_timer *)
+{
+	DeviceLayer::PlatformMgr().ScheduleWork([](intptr_t) {
+		LOG_INF("Factory reset triggered.");
+		chip::Server::GetInstance().ScheduleFactoryReset();
+	}, 0);
+}
+
 void AppTask::ButtonEventHandler(Nrf::ButtonState state, Nrf::ButtonMask hasChanged)
 {
-#ifdef CONFIG_CHIP_ICD_UAT_SUPPORT
-	if ((UAT_BUTTON_MASK & state & hasChanged)) {
-		LOG_INF("ICD UserActiveMode has been triggered.");
-		Server::GetInstance().GetICDManager().OnNetworkActivity();
+	if (kFactoryResetButtonMask & hasChanged) {
+		if (kFactoryResetButtonMask & state) {
+			LOG_INF("Factory reset button pressed, hold 3s to reset.");
+			k_timer_start(&Instance().mFactoryResetTimer, K_MSEC(kFactoryResetTriggerMs), K_NO_WAIT);
+		} else {
+			LOG_INF("Factory reset cancelled.");
+			k_timer_stop(&Instance().mFactoryResetTimer);
+		}
 	}
-#endif
 }
 
 void AppTask::UpdateTemperatureTimeoutCallback(k_timer *timer)
@@ -67,8 +81,34 @@ void AppTask::UpdateTemperatureTimeoutCallback(k_timer *timer)
 		reinterpret_cast<intptr_t>(timer->user_data));
 }
 
+void AppTask::UpdateHumidityTimeoutCallback(k_timer *timer)
+{
+	if (!timer || !timer->user_data) {
+		return;
+	}
+
+	DeviceLayer::PlatformMgr().ScheduleWork(
+		[](intptr_t p) {
+			AppTask::Instance().UpdateHumidityMeasurement();
+
+			uint16_t humidity = AppTask::Instance().GetCurrentHumidity();
+			LOG_INF("Humidity: %d.%02d %%", humidity / 100, humidity % 100);
+
+			Protocols::InteractionModel::Status status =
+				Clusters::RelativeHumidityMeasurement::Attributes::MeasuredValue::Set(
+					kTemperatureSensorEndpointId, humidity);
+
+			if (status != Protocols::InteractionModel::Status::Success) {
+				LOG_ERR("Updating humidity measurement failed %x", to_underlying(status));
+			}
+		},
+		reinterpret_cast<intptr_t>(timer->user_data));
+}
+
 CHIP_ERROR AppTask::Init()
 {
+	k_timer_init(&mFactoryResetTimer, FactoryResetTimerCallback, nullptr);
+
 	/* Initialize Matter stack */
 	ReturnErrorOnFailure(Nrf::Matter::PrepareServer());
 
@@ -113,6 +153,32 @@ CHIP_ERROR AppTask::StartApp()
 	k_timer_init(&mTimer, AppTask::UpdateTemperatureTimeoutCallback, nullptr);
 	k_timer_user_data_set(&mTimer, this);
 	k_timer_start(&mTimer, K_MSEC(kTemperatureMeasurementIntervalMs), K_MSEC(kTemperatureMeasurementIntervalMs));
+
+	DataModel::Nullable<uint16_t> humVal;
+	status = Clusters::RelativeHumidityMeasurement::Attributes::MinMeasuredValue::Get(kTemperatureSensorEndpointId,
+										       humVal);
+
+	if (status != Protocols::InteractionModel::Status::Success || humVal.IsNull()) {
+		LOG_ERR("Failed to get humidity measurement min value %x", to_underlying(status));
+		return CHIP_ERROR_INCORRECT_STATE;
+	}
+
+	mHumiditySensorMinValue = humVal.Value();
+
+	status = Clusters::RelativeHumidityMeasurement::Attributes::MaxMeasuredValue::Get(kTemperatureSensorEndpointId,
+										       humVal);
+
+	if (status != Protocols::InteractionModel::Status::Success || humVal.IsNull()) {
+		LOG_ERR("Failed to get humidity measurement max value %x", to_underlying(status));
+		return CHIP_ERROR_INCORRECT_STATE;
+	}
+
+	mHumiditySensorMaxValue = humVal.Value();
+
+	k_timer_init(&mHumidityTimer, AppTask::UpdateHumidityTimeoutCallback, nullptr);
+	k_timer_user_data_set(&mHumidityTimer, this);
+	k_timer_start(&mHumidityTimer, K_MSEC(kTemperatureMeasurementIntervalMs),
+		      K_MSEC(kTemperatureMeasurementIntervalMs));
 
 	while (true) {
 		Nrf::DispatchNextTask();
