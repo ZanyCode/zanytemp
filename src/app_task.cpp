@@ -14,6 +14,7 @@
 
 #include <app-common/zap-generated/attributes/Accessors.h>
 
+#include <zephyr/drivers/i2c.h>
 #include <zephyr/drivers/sensor.h>
 #include <zephyr/logging/log.h>
 
@@ -36,6 +37,25 @@ constexpr Nrf::ButtonMask kFactoryResetButtonMask = DK_BTN1_MSK;
 #define UAT_BUTTON_MASK 1
 #endif
 } /* namespace */
+
+void AppTask::RunHeaterCycle()
+{
+	/* SHT41 heater command bytes: low/short, med/short, med/long */
+	static const uint8_t heater_cmds[] = { 0x15, 0x24, 0x2F };
+	static const struct i2c_dt_spec sht41_i2c = I2C_DT_SPEC_GET(DT_NODELABEL(sht41));
+
+	uint8_t cmd = heater_cmds[mHeaterEscalationLevel];
+	int rc = i2c_write_dt(&sht41_i2c, &cmd, 1);
+	if (rc) {
+		LOG_ERR("Heater command failed: %d", rc);
+	} else {
+		LOG_INF("Heater fired (level %d, cmd 0x%02x)", mHeaterEscalationLevel, cmd);
+	}
+
+	if (mHeaterEscalationLevel < 2) {
+		mHeaterEscalationLevel++;
+	}
+}
 
 void AppTask::FactoryResetTimerCallback(k_timer *)
 {
@@ -66,7 +86,8 @@ void AppTask::UpdateSensorTimeoutCallback(k_timer *timer)
 
 	DeviceLayer::PlatformMgr().ScheduleWork(
 		[](intptr_t p) {
-			const struct device *dev = AppTask::Instance().mSht4xDev;
+			AppTask &app = AppTask::Instance();
+			const struct device *dev = app.mSht4xDev;
 
 			int err = sensor_sample_fetch(dev);
 			if (err) {
@@ -86,9 +107,48 @@ void AppTask::UpdateSensorTimeoutCallback(k_timer *timer)
 			uint16_t humidity =
 				(uint16_t)(hum_val.val1 * 100 + hum_val.val2 / 10000);
 
-			LOG_INF("Temperature: %d.%02d °C, Humidity: %d.%02d %%",
-				temperature / 100, abs(temperature % 100),
-				humidity / 100, humidity % 100);
+			/* Anti-condensation heater state machine */
+			if (app.mHeaterState == HeaterState::Idle) {
+				/* 6500 = 65 °C in Matter units; SHT41 heater must not run above that */
+				if (temperature < 6500 &&
+				    humidity >= kHighHumidityThreshold) {
+					app.mHighHumidityCount++;
+					if (app.mHighHumidityCount >= kCondensationTriggerCount) {
+						app.RunHeaterCycle();
+						app.mHeaterState        = HeaterState::Cooldown;
+						app.mCooldownCyclesLeft = kHeaterCooldownCycles;
+						app.mHighHumidityCount  = 0;
+					}
+				} else {
+					app.mHighHumidityCount     = 0;
+					app.mHeaterEscalationLevel = 0;
+				}
+			} else { /* Cooldown */
+				app.mCooldownCyclesLeft--;
+				if (humidity < kHighHumidityThreshold) {
+					app.mHeaterEscalationLevel = 0;
+				}
+				if (app.mCooldownCyclesLeft == 0) {
+					app.mHeaterState = HeaterState::Idle;
+				}
+			}
+
+			if (app.mHeaterState == HeaterState::Cooldown) {
+				LOG_INF("Temperature: %d.%02d °C, Humidity: %d.%02d %% [heater cooldown %d/%d]",
+					temperature / 100, abs(temperature % 100),
+					humidity / 100, humidity % 100,
+					kHeaterCooldownCycles - app.mCooldownCyclesLeft,
+					kHeaterCooldownCycles);
+			} else if (app.mHighHumidityCount > 0) {
+				LOG_INF("Temperature: %d.%02d °C, Humidity: %d.%02d %% [high RH %d/%d]",
+					temperature / 100, abs(temperature % 100),
+					humidity / 100, humidity % 100,
+					app.mHighHumidityCount, kCondensationTriggerCount);
+			} else {
+				LOG_INF("Temperature: %d.%02d °C, Humidity: %d.%02d %%",
+					temperature / 100, abs(temperature % 100),
+					humidity / 100, humidity % 100);
+			}
 
 			Protocols::InteractionModel::Status status =
 				Clusters::TemperatureMeasurement::Attributes::MeasuredValue::Set(

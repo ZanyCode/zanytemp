@@ -35,5 +35,18 @@ private:
 
 	static void ButtonEventHandler(Nrf::ButtonState state, Nrf::ButtonMask hasChanged);
 
+	void RunHeaterCycle();
+
 	const struct device *mSht4xDev = nullptr;
+
+	/* Anti-condensation heater state */
+	static constexpr uint16_t kHighHumidityThreshold  = 8500; /* 85.00 %RH in Matter units */
+	static constexpr uint8_t  kCondensationTriggerCount = 3;  /* consecutive readings before heating */
+	static constexpr uint8_t  kHeaterCooldownCycles    = 6;   /* measurement cycles to wait after heating */
+
+	enum class HeaterState : uint8_t { Idle, Cooldown };
+	HeaterState mHeaterState         = HeaterState::Idle;
+	uint8_t     mHighHumidityCount   = 0;
+	uint8_t     mCooldownCyclesLeft  = 0;
+	uint8_t     mHeaterEscalationLevel = 0;
 };
