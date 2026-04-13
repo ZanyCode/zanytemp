@@ -77,6 +77,15 @@ dmic_dev: &pdm20 {
 	};
 };
 
+/* SHT41 temperature/humidity sensor on D4 (SDA) and D5 (SCL) = i2c22 */
+&i2c22 {
+	sht41: sht4x@44 {
+		compatible = "sensirion,sht4x";
+		reg = <0x44>;
+		repeatability = <2>; /* high repeatability, 8.2 ms measurement time */
+	};
+};
+
 /* restore full RRAM and SRAM space - by default some parts are dedicated to FLRP */
 &cpuapp_rram {
 	reg = <0x0 DT_SIZE_K(1524)>;

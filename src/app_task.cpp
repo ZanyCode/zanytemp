@@ -14,6 +14,7 @@
 
 #include <app-common/zap-generated/attributes/Accessors.h>
 
+#include <zephyr/drivers/sensor.h>
 #include <zephyr/logging/log.h>
 
 LOG_MODULE_DECLARE(app, CONFIG_CHIP_APP_LOG_LEVEL);
@@ -57,7 +58,7 @@ void AppTask::ButtonEventHandler(Nrf::ButtonState state, Nrf::ButtonMask hasChan
 	}
 }
 
-void AppTask::UpdateTemperatureTimeoutCallback(k_timer *timer)
+void AppTask::UpdateSensorTimeoutCallback(k_timer *timer)
 {
 	if (!timer || !timer->user_data) {
 		return;
@@ -65,41 +66,43 @@ void AppTask::UpdateTemperatureTimeoutCallback(k_timer *timer)
 
 	DeviceLayer::PlatformMgr().ScheduleWork(
 		[](intptr_t p) {
-			AppTask::Instance().UpdateTemperatureMeasurement();
+			const struct device *dev = AppTask::Instance().mSht4xDev;
 
-			int16_t temperature = AppTask::Instance().GetCurrentTemperature();
-			LOG_INF("Temperature: %d.%02d °C", temperature / 100, temperature % 100);
+			int err = sensor_sample_fetch(dev);
+			if (err) {
+				LOG_ERR("Failed to fetch SHT41 sample: %d", err);
+				return;
+			}
+
+			struct sensor_value temp_val, hum_val;
+			sensor_channel_get(dev, SENSOR_CHAN_AMBIENT_TEMP, &temp_val);
+			sensor_channel_get(dev, SENSOR_CHAN_HUMIDITY, &hum_val);
+
+			/* Matter temperature cluster: int16_t = 100 × °C (0.01 °C resolution) */
+			int16_t temperature =
+				(int16_t)(temp_val.val1 * 100 + temp_val.val2 / 10000);
+
+			/* Matter humidity cluster: uint16_t = 100 × %RH (0.01 %RH resolution) */
+			uint16_t humidity =
+				(uint16_t)(hum_val.val1 * 100 + hum_val.val2 / 10000);
+
+			LOG_INF("Temperature: %d.%02d °C, Humidity: %d.%02d %%",
+				temperature / 100, abs(temperature % 100),
+				humidity / 100, humidity % 100);
 
 			Protocols::InteractionModel::Status status =
 				Clusters::TemperatureMeasurement::Attributes::MeasuredValue::Set(
 					kTemperatureSensorEndpointId, temperature);
-
 			if (status != Protocols::InteractionModel::Status::Success) {
-				LOG_ERR("Updating temperature measurement failed %x", to_underlying(status));
+				LOG_ERR("Updating temperature measurement failed %x",
+					to_underlying(status));
 			}
-		},
-		reinterpret_cast<intptr_t>(timer->user_data));
-}
 
-void AppTask::UpdateHumidityTimeoutCallback(k_timer *timer)
-{
-	if (!timer || !timer->user_data) {
-		return;
-	}
-
-	DeviceLayer::PlatformMgr().ScheduleWork(
-		[](intptr_t p) {
-			AppTask::Instance().UpdateHumidityMeasurement();
-
-			uint16_t humidity = AppTask::Instance().GetCurrentHumidity();
-			LOG_INF("Humidity: %d.%02d %%", humidity / 100, humidity % 100);
-
-			Protocols::InteractionModel::Status status =
-				Clusters::RelativeHumidityMeasurement::Attributes::MeasuredValue::Set(
-					kTemperatureSensorEndpointId, humidity);
-
+			status = Clusters::RelativeHumidityMeasurement::Attributes::MeasuredValue::Set(
+				kTemperatureSensorEndpointId, humidity);
 			if (status != Protocols::InteractionModel::Status::Success) {
-				LOG_ERR("Updating humidity measurement failed %x", to_underlying(status));
+				LOG_ERR("Updating humidity measurement failed %x",
+					to_underlying(status));
 			}
 		},
 		reinterpret_cast<intptr_t>(timer->user_data));
@@ -108,6 +111,12 @@ void AppTask::UpdateHumidityTimeoutCallback(k_timer *timer)
 CHIP_ERROR AppTask::Init()
 {
 	k_timer_init(&mFactoryResetTimer, FactoryResetTimerCallback, nullptr);
+
+	mSht4xDev = DEVICE_DT_GET(DT_NODELABEL(sht41));
+	if (!device_is_ready(mSht4xDev)) {
+		LOG_ERR("SHT41 sensor not ready");
+		return CHIP_ERROR_INCORRECT_STATE;
+	}
 
 	/* Initialize Matter stack */
 	ReturnErrorOnFailure(Nrf::Matter::PrepareServer());
@@ -130,55 +139,9 @@ CHIP_ERROR AppTask::StartApp()
 {
 	ReturnErrorOnFailure(Init());
 
-	DataModel::Nullable<int16_t> val;
-	Protocols::InteractionModel::Status status =
-		Clusters::TemperatureMeasurement::Attributes::MinMeasuredValue::Get(kTemperatureSensorEndpointId, val);
-
-	if (status != Protocols::InteractionModel::Status::Success || val.IsNull()) {
-		LOG_ERR("Failed to get temperature measurement min value %x", to_underlying(status));
-		return CHIP_ERROR_INCORRECT_STATE;
-	}
-
-	mTemperatureSensorMinValue = val.Value();
-
-	status = Clusters::TemperatureMeasurement::Attributes::MaxMeasuredValue::Get(kTemperatureSensorEndpointId, val);
-
-	if (status != Protocols::InteractionModel::Status::Success || val.IsNull()) {
-		LOG_ERR("Failed to get temperature measurement max value %x", to_underlying(status));
-		return CHIP_ERROR_INCORRECT_STATE;
-	}
-
-	mTemperatureSensorMaxValue = val.Value();
-
-	k_timer_init(&mTimer, AppTask::UpdateTemperatureTimeoutCallback, nullptr);
+	k_timer_init(&mTimer, AppTask::UpdateSensorTimeoutCallback, nullptr);
 	k_timer_user_data_set(&mTimer, this);
-	k_timer_start(&mTimer, K_MSEC(kTemperatureMeasurementIntervalMs), K_MSEC(kTemperatureMeasurementIntervalMs));
-
-	DataModel::Nullable<uint16_t> humVal;
-	status = Clusters::RelativeHumidityMeasurement::Attributes::MinMeasuredValue::Get(kTemperatureSensorEndpointId,
-										       humVal);
-
-	if (status != Protocols::InteractionModel::Status::Success || humVal.IsNull()) {
-		LOG_ERR("Failed to get humidity measurement min value %x", to_underlying(status));
-		return CHIP_ERROR_INCORRECT_STATE;
-	}
-
-	mHumiditySensorMinValue = humVal.Value();
-
-	status = Clusters::RelativeHumidityMeasurement::Attributes::MaxMeasuredValue::Get(kTemperatureSensorEndpointId,
-										       humVal);
-
-	if (status != Protocols::InteractionModel::Status::Success || humVal.IsNull()) {
-		LOG_ERR("Failed to get humidity measurement max value %x", to_underlying(status));
-		return CHIP_ERROR_INCORRECT_STATE;
-	}
-
-	mHumiditySensorMaxValue = humVal.Value();
-
-	k_timer_init(&mHumidityTimer, AppTask::UpdateHumidityTimeoutCallback, nullptr);
-	k_timer_user_data_set(&mHumidityTimer, this);
-	k_timer_start(&mHumidityTimer, K_MSEC(kTemperatureMeasurementIntervalMs),
-		      K_MSEC(kTemperatureMeasurementIntervalMs));
+	k_timer_start(&mTimer, K_MSEC(kMeasurementIntervalMs), K_MSEC(kMeasurementIntervalMs));
 
 	while (true) {
 		Nrf::DispatchNextTask();
