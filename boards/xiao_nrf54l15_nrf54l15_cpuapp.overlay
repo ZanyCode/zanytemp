@@ -48,12 +48,8 @@
 	status = "okay";
 };
 
-&nfct {
-	status = "okay";
-};
-
-dmic_dev: &pdm20 {
-	status = "okay";
+&pdm20 {
+	status = "disabled";
 };
 
 &pwm20 {

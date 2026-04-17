@@ -28,7 +28,7 @@ private:
 	k_timer mTimer;
 	k_timer mFactoryResetTimer;
 
-	static constexpr uint16_t kMeasurementIntervalMs = 10000; /* 10 seconds */
+	static constexpr uint16_t kMeasurementIntervalMs = 30000; /* 10 seconds */
 
 	static void UpdateSensorTimeoutCallback(k_timer *timer);
 	static void FactoryResetTimerCallback(k_timer *timer);
