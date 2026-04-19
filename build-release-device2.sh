@@ -1,0 +1,1 @@
+west build -b xiao_nrf54l15/nrf54l15/cpuapp -- -DCONF_FILE="prj_release.conf" -DEXTRA_CONF_FILE=device2.conf

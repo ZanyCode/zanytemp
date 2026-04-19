@@ -13,6 +13,7 @@
 	zephyr,user {
 		io-channels = <&adc 0>, <&adc 1>, <&adc 2>, <&adc 3>,
 			<&adc 4>, <&adc 5>, <&adc 6>, <&adc 7>;
+		rfsw-ctl-gpios = <&gpio2 5 GPIO_ACTIVE_HIGH>;
 	};
 
 	leds {
@@ -39,6 +40,8 @@
 		};
 	};
 };
+
+
 
 &wdt31 {
 	status = "okay";

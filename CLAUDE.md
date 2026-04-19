@@ -13,11 +13,12 @@ source ~/nrf_env.sh
 
 ## Build
 ```bash
-source ~/nrf_env.sh && west build
+source ~/nrf_env.sh && sh build-device1.sh
 ```
 Force a clean rebuild:
 ```bash
-source ~/nrf_env.sh && west build --pristine
+rm -rf build
+source ~/nrf_env.sh && sh build-device1.sh
 ```
 
 ## Flash
