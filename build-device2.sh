@@ -1,1 +1,0 @@
-west build -b xiao_nrf54l15/nrf54l15/cpuapp -- -DEXTRA_CONF_FILE=device2.conf
